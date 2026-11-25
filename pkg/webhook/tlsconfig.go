@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -111,7 +112,30 @@ func checkUnsupportedFlags(unsupported, flagGroups, flagCiphers []string) error 
 	return nil
 }
 
-// splitCommaList splits a flag value on commas, ignoring whitespace and empty entries.
+// SetupAPIServerTLSWatcher restarts the process when the APIServer cipher suites or TLS groups change.
+func SetupAPIServerTLSWatcher(
+	mgr ctrl.Manager, initialProfile configv1.TLSProfileSpec, onChange func(oldProfile, currentProfile configv1.TLSProfileSpec),
+) error {
+	watcher := &openshifttls.SecurityProfileWatcher{
+		Client:                mgr.GetClient(),
+		InitialTLSProfileSpec: initialProfile,
+		OnProfileChange: func(_ context.Context, oldProfile, currentProfile configv1.TLSProfileSpec) {
+			if profileChanged(oldProfile, currentProfile) {
+				onChange(oldProfile, currentProfile)
+			}
+		},
+	}
+
+	return watcher.SetupWithManager(mgr)
+}
+
+// profileChanged reports whether the TLS ciphers or groups changed. The minimum version is not watched
+// because it always comes from --tls-min-version.
+func profileChanged(oldProfile, currentProfile configv1.TLSProfileSpec) bool {
+	return !slices.Equal(oldProfile.Ciphers, currentProfile.Ciphers) ||
+		!slices.Equal(oldProfile.Groups, currentProfile.Groups)
+}
+
 func splitCommaList(values string) []string {
 	return strings.Fields(strings.ReplaceAll(values, ",", " "))
 }

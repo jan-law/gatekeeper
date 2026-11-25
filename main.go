@@ -66,10 +66,12 @@ import (
 	"github.com/open-policy-agent/gatekeeper/v3/pkg/version"
 	"github.com/open-policy-agent/gatekeeper/v3/pkg/watch"
 	"github.com/open-policy-agent/gatekeeper/v3/pkg/webhook"
+	configv1 "github.com/openshift/api/config/v1"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/rest"
@@ -139,6 +141,7 @@ func init() {
 	_ = expansionv1alpha1.AddToScheme(scheme)
 	_ = expansionv1beta1.AddToScheme(scheme)
 	_ = connectionv1alpha1.AddToScheme(scheme)
+	_ = configv1.AddToScheme(scheme)
 
 	// +kubebuilder:scaffold:scheme
 	flag.Var(disabledBuiltins, "disable-opa-builtin", "disable opa built-in function, this flag can be declared more than once.")
@@ -249,7 +252,7 @@ func innerMain() int {
 		tlsConfig = config
 	}
 
-	tlsOpts, _, _, err := webhook.ResolveTLSConfig(
+	tlsOpts, watchAPIServer, initialTLSProfile, err := webhook.ResolveTLSConfig(
 		ctx, tlsConfig, scheme, *webhook.TLSMinVersion, *webhook.TLSCipherSuites, *webhook.TLSGroups, *webhook.ClientCAName,
 	)
 	if err != nil {
@@ -292,6 +295,20 @@ func innerMain() int {
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		return 1
+	}
+
+	if len(webhooks) > 0 && watchAPIServer {
+		onTLSProfileChange := func(_, _ configv1.TLSProfileSpec) {
+			setupLog.Info("The APIServer TLS profile changed; shutting down so the pod restarts with the new settings")
+
+			// Stagger replica restarts so the webhook keeps serving while pods cycle.
+			time.Sleep(time.Duration(utilrand.Intn(30)) * time.Second)
+			cancel()
+		}
+
+		if err := webhook.SetupAPIServerTLSWatcher(mgr, initialTLSProfile, onTLSProfileChange); err != nil {
+			setupLog.Info("Unable to watch the APIServer TLS profile; using the resolved TLS settings", "error", err)
+		}
 	}
 
 	// Make sure certs are generated and valid if cert rotation is enabled.
