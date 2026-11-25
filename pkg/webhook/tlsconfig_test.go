@@ -3,10 +3,12 @@ package webhook
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -276,4 +278,50 @@ func TestResolveTLSConfigClientCA(t *testing.T) {
 
 	assert.Equal(t, uint16(tls.VersionTLS12), got.MinVersion)
 	assert.NotNil(t, got.VerifyConnection)
+}
+
+func TestProfileChanged(t *testing.T) {
+	base := configv1.TLSProfileSpec{Ciphers: []string{"a"}, Groups: []configv1.TLSGroup{"b"}}
+
+	assert.False(t, profileChanged(base, base))
+	assert.False(t, profileChanged(base, configv1.TLSProfileSpec{
+		MinTLSVersion: configv1.VersionTLS13, Ciphers: base.Ciphers, Groups: base.Groups,
+	}))
+	assert.True(t, profileChanged(base, configv1.TLSProfileSpec{Ciphers: []string{"c"}, Groups: base.Groups}))
+	assert.True(t, profileChanged(base, configv1.TLSProfileSpec{Ciphers: base.Ciphers, Groups: []configv1.TLSGroup{"c"}}))
+}
+
+// TestResolveTLSConfigHandshake proves the resolved cipher suite and group reach a real TLS listener.
+func TestResolveTLSConfigHandshake(t *testing.T) {
+	tlsOpts, _, _, err := ResolveTLSConfig(t.Context(), nil, nil, tlsVersion12, tls12CipherSuite, tlsGroupP384, "")
+	require.NoError(t, err)
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server.TLS = tlsConfigFrom(tlsOpts)
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+
+	newClient := func(cipherSuite uint16, group tls.CurveID) *http.Client {
+		// nolint:gosec // TLS 1.2 is required to test the --tls-cipher-suites flag
+		return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs:          pool,
+			MaxVersion:       tls.VersionTLS12,
+			CipherSuites:     []uint16{cipherSuite},
+			CurvePreferences: []tls.CurveID{group},
+		}}}
+	}
+
+	resp, err := newClient(tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, tls.CurveP384).Get(server.URL)
+	require.NoError(t, err)
+	assert.Equal(t, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, resp.TLS.CipherSuite)
+	require.NoError(t, resp.Body.Close())
+
+	_, err = newClient(tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, tls.CurveP384).Get(server.URL)
+	require.Error(t, err)
+
+	_, err = newClient(tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, tls.X25519).Get(server.URL)
+	require.Error(t, err)
 }
