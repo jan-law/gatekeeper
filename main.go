@@ -17,7 +17,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"flag"
@@ -242,24 +241,30 @@ func innerMain() int {
 	// Must be called before ctrl.NewManager!
 	metrics.DisableRESTClientMetrics()
 
-	tlsVersion, err := webhook.ParseTLSVersion(*webhook.TLSMinVersion)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var tlsConfig *rest.Config
+	if len(webhooks) > 0 {
+		tlsConfig = config
+	}
+
+	tlsOpts, _, _, err := webhook.ResolveTLSConfig(
+		ctx, tlsConfig, scheme, *webhook.TLSMinVersion, *webhook.TLSCipherSuites, *webhook.TLSGroups, *webhook.ClientCAName,
+	)
 	if err != nil {
-		setupLog.Error(err, "unable to parse TLS version")
+		setupLog.Error(err, "unable to resolve TLS configuration")
 		return 1
 	}
+
 	serverOpts := crWebhook.Options{
 		Host:    *host,
 		Port:    *port,
 		CertDir: *certDir,
-		TLSOpts: []func(c *tls.Config){func(c *tls.Config) { c.MinVersion = tlsVersion }},
+		TLSOpts: tlsOpts,
 	}
 	if *webhook.ClientCAName != "" {
 		serverOpts.ClientCAName = *webhook.ClientCAName
-		serverOpts.TLSOpts = []func(*tls.Config){
-			func(cfg *tls.Config) {
-				cfg.VerifyConnection = webhook.GetCertNameVerifier()
-			},
-		}
 	}
 	// create local cluster config once if remote cluster mode is enabled, shared by RoutingCache (reads) and RoutingClient (writes)
 	var localClusterConfig *rest.Config
@@ -358,8 +363,6 @@ func innerMain() int {
 	// Setup termination with grace period. Required to give K8s Services time to disconnect the Pod endpoint on termination.
 	// Derived from how the controller-runtime sets up a signal handler with ctrl.SetupSignalHandler()
 	// controller-runtime upstream issue: https://github.com/kubernetes-sigs/controller-runtime/issues/3113
-	ctx, cancel := context.WithCancel(context.Background())
-
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, []os.Signal{os.Interrupt, syscall.SIGTERM}...)
 	go func() {
