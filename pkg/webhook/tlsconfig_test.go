@@ -53,7 +53,7 @@ func newFakeAPIServer(t *testing.T, serveOpenShiftAPI bool, tlsGroups ...string)
 			`"preferredVersion":{"groupVersion":%q,"version":"v1"}}]}`,
 		group, groupVersion, groupVersion)
 
-	profile := `{"type":"Modern"}`
+	profile := `{"type":"Intermediate"}`
 
 	if len(tlsGroups) > 0 {
 		profile = fmt.Sprintf(`{"type":"Custom","custom":{"groups":["%s"]}}`, strings.Join(tlsGroups, `","`))
@@ -133,7 +133,7 @@ func TestResolveTLSConfigUsesAPIServerProfile(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, watchAPIServer)
-	assert.Equal(t, configv1.TLSProfiles[configv1.TLSProfileModernType].Groups, profile.Groups)
+	assert.Equal(t, configv1.TLSProfiles[configv1.TLSProfileIntermediateType].Groups, profile.Groups)
 
 	got := tlsConfigFrom(tlsOpts)
 
@@ -156,9 +156,21 @@ func TestResolveTLSConfigFlagOverridesAPIServerGroup(t *testing.T) {
 	assert.NotEmpty(t, got.CipherSuites)
 }
 
+func TestResolveTLSConfigUsesAPIServerMinVersion(t *testing.T) {
+	tlsOpts, watchAPIServer, _, err := ResolveTLSConfig(
+		t.Context(), newFakeAPIServer(t, true), tlsScheme(t), "", "", "", "")
+	require.NoError(t, err)
+
+	assert.True(t, watchAPIServer)
+
+	got := tlsConfigFrom(tlsOpts)
+
+	assert.Equal(t, uint16(tls.VersionTLS12), got.MinVersion, "min version comes from the APIServer profile when the flag is unset")
+}
+
 func TestResolveTLSConfigNoAPIServerKeepsDefaults(t *testing.T) {
 	tlsOpts, watchAPIServer, profile, err := ResolveTLSConfig(
-		t.Context(), newFakeAPIServer(t, false), tlsScheme(t), "1.3", "", "", "")
+		t.Context(), newFakeAPIServer(t, false), tlsScheme(t), "", "", "", "")
 	require.NoError(t, err)
 
 	assert.False(t, watchAPIServer)
@@ -281,14 +293,22 @@ func TestResolveTLSConfigClientCA(t *testing.T) {
 }
 
 func TestProfileChanged(t *testing.T) {
-	base := configv1.TLSProfileSpec{Ciphers: []string{"a"}, Groups: []configv1.TLSGroup{"b"}}
+	base := configv1.TLSProfileSpec{
+		MinTLSVersion: configv1.VersionTLS12,
+		Ciphers:       []string{"a"},
+		Groups:        []configv1.TLSGroup{"b"},
+	}
 
 	assert.False(t, profileChanged(base, base))
-	assert.False(t, profileChanged(base, configv1.TLSProfileSpec{
+	assert.True(t, profileChanged(base, configv1.TLSProfileSpec{
 		MinTLSVersion: configv1.VersionTLS13, Ciphers: base.Ciphers, Groups: base.Groups,
 	}))
-	assert.True(t, profileChanged(base, configv1.TLSProfileSpec{Ciphers: []string{"c"}, Groups: base.Groups}))
-	assert.True(t, profileChanged(base, configv1.TLSProfileSpec{Ciphers: base.Ciphers, Groups: []configv1.TLSGroup{"c"}}))
+	assert.True(t, profileChanged(base, configv1.TLSProfileSpec{
+		MinTLSVersion: base.MinTLSVersion, Ciphers: []string{"c"}, Groups: base.Groups,
+	}))
+	assert.True(t, profileChanged(base, configv1.TLSProfileSpec{
+		MinTLSVersion: base.MinTLSVersion, Ciphers: base.Ciphers, Groups: []configv1.TLSGroup{"c"},
+	}))
 }
 
 // TestResolveTLSConfigHandshake proves the resolved cipher suite and group reach a real TLS listener.

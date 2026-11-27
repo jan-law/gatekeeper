@@ -44,7 +44,7 @@ teardown_file() {
   kubectl wait --for=condition=Ready --timeout=60s pod temp
   kubectl cp ${cert} temp:/tmp/cacert
 
-  wait_for_process ${WAIT_TIME} ${SLEEP_TIME} "kubectl exec -it temp -- curl -f --cacert /tmp/cacert --connect-timeout 1 --max-time 2  https://gatekeeper-webhook-service.${GATEKEEPER_NAMESPACE}.svc:443/v1/admitlabel"
+  wait_for_process ${WAIT_TIME} ${SLEEP_TIME} "kubectl exec -it temp -- curl -s --cacert /tmp/cacert --connect-timeout 1 --max-time 2  https://gatekeeper-webhook-service.${GATEKEEPER_NAMESPACE}.svc:443/v1/admitlabel"
   kubectl delete pod temp
 }
 
@@ -89,10 +89,10 @@ get_tls_arg() {
 
   webhook_url="https://gatekeeper-webhook-service.${GATEKEEPER_NAMESPACE}.svc:443/v1/admitlabel"
 
-  run kubectl exec tls-probe -- curl -sf --tlsv1.3 --tls-max 1.3 --cacert /tmp/cacert --connect-timeout 1 --max-time 5 ${webhook_url}
+  run kubectl exec tls-probe -- curl -s --tlsv1.3 --tls-max 1.3 --cacert /tmp/cacert --connect-timeout 1 --max-time 5 ${webhook_url}
   assert_success
 
-  run kubectl exec tls-probe -- curl -sfS --tlsv1.2 --tls-max 1.2 --cacert /tmp/cacert --connect-timeout 1 --max-time 5 ${webhook_url}
+  run kubectl exec tls-probe -- curl -sS --tlsv1.2 --tls-max 1.2 --cacert /tmp/cacert --connect-timeout 1 --max-time 5 ${webhook_url}
   if [ "${min_version}" = "1.2" ]; then
     assert_success
   else

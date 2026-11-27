@@ -30,29 +30,30 @@ var (
 const apiServerTLSProfileTimeout = 10 * time.Second
 
 // ResolveTLSConfig merges the TLS settings used by the webhook server. Flag values take precedence, then the
-// APIServer TLS profile. The minimum TLS version always comes from --tls-min-version so the existing 1.3 default
-// is preserved.
+// APIServer TLS profile. The minimum TLS version comes from --tls-min-version when set, otherwise from the
+// APIServer TLS profile, falling back to 1.3 when the profile is unavailable.
 func ResolveTLSConfig(
 	ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme, minVersion, cipherSuites, groups, clientCAName string,
 ) (tlsOpts []func(*tls.Config), watchAPIServer bool, initialProfile configv1.TLSProfileSpec, err error) {
-	minVersionID, err := ParseTLSVersion(minVersion)
-	if err != nil {
-		return nil, false, configv1.TLSProfileSpec{}, err
-	}
-
 	flagCiphers := splitCommaList(cipherSuites)
 	flagGroups := splitCommaList(groups)
 
-	spec := configv1.TLSProfileSpec{
-		MinTLSVersion: configv1.TLSProtocolVersion(libgocrypto.TLSVersionToNameOrDie(minVersionID)),
-		Ciphers:       flagCiphers,
+	spec := configv1.TLSProfileSpec{Ciphers: flagCiphers}
+
+	if minVersion != "" {
+		minVersionID, err := ParseTLSVersion(minVersion)
+		if err != nil {
+			return nil, false, configv1.TLSProfileSpec{}, err
+		}
+
+		spec.MinTLSVersion = configv1.TLSProtocolVersion(libgocrypto.TLSVersionToNameOrDie(minVersionID))
 	}
 
 	for _, group := range flagGroups {
 		spec.Groups = append(spec.Groups, configv1.TLSGroup(group))
 	}
 
-	if (len(spec.Groups) == 0 || len(spec.Ciphers) == 0) && cfg != nil {
+	if (len(spec.Groups) == 0 || len(spec.Ciphers) == 0 || spec.MinTLSVersion == "") && cfg != nil {
 		initialProfile, watchAPIServer = readAPIServerTLSProfile(ctx, cfg, scheme)
 
 		if len(spec.Groups) == 0 {
@@ -62,6 +63,14 @@ func ResolveTLSConfig(
 		if len(spec.Ciphers) == 0 {
 			spec.Ciphers = initialProfile.Ciphers
 		}
+
+		if spec.MinTLSVersion == "" {
+			spec.MinTLSVersion = initialProfile.MinTLSVersion
+		}
+	}
+
+	if spec.MinTLSVersion == "" {
+		spec.MinTLSVersion = configv1.VersionTLS13
 	}
 
 	tlsOpt, unsupported := openshifttls.NewTLSConfigFromProfile(spec)
@@ -74,7 +83,7 @@ func ResolveTLSConfig(
 		log.Info("Some APIServer TLS values are not supported and will be ignored", "values", unsupported)
 	}
 
-	if len(spec.Ciphers) > 0 && minVersionID == tls.VersionTLS13 {
+	if len(spec.Ciphers) > 0 && spec.MinTLSVersion == configv1.VersionTLS13 {
 		log.Info("TLS cipher suites are ignored for TLS 1.3", "cipherSuites", spec.Ciphers)
 	}
 
@@ -129,10 +138,11 @@ func SetupAPIServerTLSWatcher(
 	return watcher.SetupWithManager(mgr)
 }
 
-// profileChanged reports whether the TLS ciphers or groups changed. The minimum version is not watched
-// because it always comes from --tls-min-version.
+// profileChanged reports whether the APIServer TLS profile changed enough to require a restart, including the
+// minimum version when it is sourced from the profile.
 func profileChanged(oldProfile, currentProfile configv1.TLSProfileSpec) bool {
-	return !slices.Equal(oldProfile.Ciphers, currentProfile.Ciphers) ||
+	return oldProfile.MinTLSVersion != currentProfile.MinTLSVersion ||
+		!slices.Equal(oldProfile.Ciphers, currentProfile.Ciphers) ||
 		!slices.Equal(oldProfile.Groups, currentProfile.Groups)
 }
 
@@ -143,11 +153,11 @@ func splitCommaList(values string) []string {
 func readAPIServerTLSProfile(
 	ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme,
 ) (profile configv1.TLSProfileSpec, watchable bool) {
-	cfg = rest.CopyConfig(cfg)
-	// Bounds RESTMapper discovery, which runs without the fetch context.
-	cfg.Timeout = apiServerTLSProfileTimeout
+	// Static mapping for APIServer keeps the lookup inside fetchCtx.
+	mapper := meta.NewDefaultRESTMapper(nil)
+	mapper.Add(configv1.GroupVersion.WithKind("APIServer"), meta.RESTScopeRoot)
 
-	apiServerClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	apiServerClient, err := client.New(cfg, client.Options{Scheme: scheme, Mapper: mapper})
 	if err != nil {
 		log.Error(err, "Failed to create a client for the APIServer resource")
 
